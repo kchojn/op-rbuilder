@@ -208,6 +208,10 @@ pub struct FlashblocksArgs {
     /// Flashblocks p2p configuration
     #[command(flatten)]
     pub p2p: FlashblocksP2pArgs,
+
+    /// Compose sidecar configuration
+    #[command(flatten)]
+    pub sidecar: SidecarArgs,
 }
 
 impl Default for FlashblocksArgs {
@@ -261,6 +265,33 @@ pub struct FlashblocksP2pArgs {
         default_value = "50"
     )]
     pub p2p_max_peer_count: u32,
+}
+
+/// Configuration for compose sidecar integration.
+/// When enabled, the builder polls the sidecar for cross-chain transactions
+/// at each flashblock boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+pub struct SidecarArgs {
+    /// HTTP endpoint of the compose sidecar (e.g., "http://localhost:8082").
+    /// If empty, sidecar integration is disabled.
+    #[arg(long = "sidecar.endpoint", env = "SIDECAR_ENDPOINT")]
+    pub endpoint: Option<String>,
+
+    /// Timeout in milliseconds for sidecar poll requests.
+    #[arg(
+        long = "sidecar.poll-timeout-ms",
+        env = "SIDECAR_POLL_TIMEOUT_MS",
+        default_value = "200"
+    )]
+    pub poll_timeout_ms: u64,
+
+    /// Maximum number of retries when sidecar returns hold response.
+    #[arg(
+        long = "sidecar.max-retries",
+        env = "SIDECAR_MAX_RETRIES",
+        default_value = "5"
+    )]
+    pub max_retries: u32,
 }
 
 /// Parameters for telemetry configuration

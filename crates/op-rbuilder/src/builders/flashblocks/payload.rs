@@ -188,6 +188,8 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx> {
     pub builder_tx: BuilderTx,
     /// Rate limiting based on gas. This is an optional feature.
     pub address_gas_limiter: AddressGasLimiter,
+    /// Sidecar client for cross-chain transactions
+    pub sidecar: crate::sidecar::SidecarClient,
 }
 
 impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
@@ -204,6 +206,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
         metrics: Arc<OpRBuilderMetrics>,
     ) -> Self {
         let address_gas_limiter = AddressGasLimiter::new(config.gas_limiter_config.clone());
+        let sidecar = crate::sidecar::SidecarClient::new(config.specific.sidecar.clone());
         Self {
             evm_config,
             pool,
@@ -214,6 +217,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
             metrics,
             builder_tx,
             address_gas_limiter,
+            sidecar,
         }
     }
 }
@@ -744,6 +748,42 @@ where
             info.da_footprint_scalar,
         ) {
             *footprint = footprint.saturating_sub(builder_tx_da_size.saturating_mul(scalar as u64));
+        }
+
+        // Poll sidecar for cross-chain transactions
+        match self
+            .sidecar
+            .poll_transactions(&crate::sidecar::PollRequest {
+                chain_id: ctx.chain_id(),
+                block_number: ctx.block_number(),
+                flashblock_index,
+                state_root: ctx.parent_hash(),
+                timestamp: ctx.timestamp(),
+                gas_limit: target_gas_for_batch,
+            })
+            .await
+        {
+            Ok(Some(external_txs)) if !external_txs.is_empty() => {
+                ctx.execute_sidecar_transactions(
+                    info,
+                    state,
+                    external_txs,
+                    target_gas_for_batch.min(ctx.block_gas_limit()),
+                    target_da_for_batch,
+                    target_da_footprint_for_batch,
+                )
+                .wrap_err("failed to execute sidecar transactions")?;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    target: "payload_builder",
+                    block_number = ctx.block_number(),
+                    flashblock_index,
+                    %err,
+                    "sidecar poll failed, continuing without external transactions"
+                );
+            }
         }
 
         let best_txs_start_time = Instant::now();

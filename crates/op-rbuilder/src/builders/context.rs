@@ -1,5 +1,5 @@
 use alloy_consensus::{Eip658Value, Transaction, conditional::BlockConditionalAttributes};
-use alloy_eips::{Encodable2718, Typed2718};
+use alloy_eips::{Decodable2718, Encodable2718, Typed2718};
 use alloy_evm::Database;
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{BlockHash, Bytes, U256};
@@ -43,6 +43,7 @@ use crate::{
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
+    sidecar::{ExternalTransaction, SidecarError},
     traits::PayloadTxsBounds,
     tx::MaybeRevertingTransaction,
     tx_signer::Signer,
@@ -622,5 +623,179 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             bundles_reverted = num_bundles_reverted,
         );
         Ok(None)
+    }
+
+    /// Executes external transactions from the compose sidecar.
+    ///
+    /// External transactions are cross-chain transactions coordinated by the sidecar.
+    /// Required transactions must succeed or the flashblock build fails.
+    /// Optional transactions are best-effort and skipped on failure.
+    pub(super) fn execute_sidecar_transactions<E: Debug + Default>(
+        &self,
+        info: &mut ExecutionInfo<E>,
+        db: &mut State<impl Database>,
+        external_txs: Vec<ExternalTransaction>,
+        block_gas_limit: u64,
+        block_da_limit: Option<u64>,
+        block_da_footprint_limit: Option<u64>,
+    ) -> Result<(), PayloadBuilderError> {
+        if external_txs.is_empty() {
+            return Ok(());
+        }
+
+        let tx_da_limit = self.da_config.max_da_tx_size();
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+
+        debug!(
+            target: "payload_builder",
+            count = external_txs.len(),
+            required_count = external_txs.iter().filter(|t| t.required).count(),
+            "Executing sidecar transactions",
+        );
+
+        for ext_tx in external_txs {
+            let tx = match OpTransactionSigned::decode_2718(&mut ext_tx.raw.as_ref()) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    if ext_tx.required {
+                        return Err(PayloadBuilderError::other(SidecarError::DecodeError(
+                            err.to_string(),
+                        )));
+                    }
+                    trace!(
+                        target: "payload_builder",
+                        %err,
+                        "skipping malformed optional sidecar transaction"
+                    );
+                    continue;
+                }
+            };
+
+            let tx_hash = tx.tx_hash();
+
+            let tx = match tx.try_clone_into_recovered() {
+                Ok(tx) => tx,
+                Err(_) => {
+                    if ext_tx.required {
+                        return Err(PayloadBuilderError::other(
+                            SidecarError::SignatureRecoveryFailed,
+                        ));
+                    }
+                    trace!(
+                        target: "payload_builder",
+                        ?tx_hash,
+                        "skipping sidecar transaction with invalid signature"
+                    );
+                    continue;
+                }
+            };
+
+            // Sidecar transactions must not be deposit or blob transactions
+            if tx.is_eip4844() || tx.is_deposit() {
+                if ext_tx.required {
+                    return Err(PayloadBuilderError::other(
+                        SidecarError::InvalidTransactionType,
+                    ));
+                }
+                trace!(
+                    target: "payload_builder",
+                    ?tx_hash,
+                    "skipping sidecar blob/deposit transaction"
+                );
+                continue;
+            }
+
+            // Calculate DA size for limit checks
+            let tx_da_size =
+                op_alloy_flz::tx_estimated_size_fjord_bytes(tx.encoded_2718().as_slice());
+
+            // Validate block limits
+            if let Err(result) = info.is_tx_over_limits(
+                tx_da_size,
+                block_gas_limit,
+                tx_da_limit,
+                block_da_limit,
+                tx.gas_limit(),
+                info.da_footprint_scalar,
+                block_da_footprint_limit,
+            ) {
+                if ext_tx.required {
+                    return Err(PayloadBuilderError::other(SidecarError::LimitsExceeded(
+                        result.to_string(),
+                    )));
+                }
+                debug!(
+                    target: "payload_builder",
+                    ?tx_hash,
+                    %result,
+                    "skipping optional sidecar transaction over limits"
+                );
+                continue;
+            }
+
+            // Execute the transaction
+            let ResultAndState { result, state } = match evm.transact(&tx) {
+                Ok(res) => res,
+                Err(err) => {
+                    if ext_tx.required {
+                        return Err(PayloadBuilderError::other(SidecarError::ExecutionFailed(
+                            err.to_string(),
+                        )));
+                    }
+                    trace!(
+                        target: "payload_builder",
+                        %err,
+                        ?tx_hash,
+                        "skipping failed optional sidecar transaction"
+                    );
+                    continue;
+                }
+            };
+
+            // Handle reverted transactions
+            if !result.is_success() {
+                if ext_tx.required {
+                    return Err(PayloadBuilderError::other(
+                        SidecarError::TransactionReverted(tx_hash.to_string()),
+                    ));
+                }
+                // Optional transactions that revert are skipped
+                debug!(
+                    target: "payload_builder",
+                    ?tx_hash,
+                    "skipping reverted optional sidecar transaction"
+                );
+                continue;
+            }
+
+            let gas_used = result.gas_used();
+            info.cumulative_gas_used += gas_used;
+            info.cumulative_da_bytes_used += tx_da_size;
+
+            let ctx = ReceiptBuilderCtx {
+                tx: tx.inner(),
+                evm: &evm,
+                result,
+                state: &state,
+                cumulative_gas_used: info.cumulative_gas_used,
+            };
+            info.receipts.push(self.build_receipt(ctx, None));
+
+            evm.db_mut().commit(state);
+
+            info.executed_senders.push(tx.signer());
+            info.executed_transactions.push(tx.into_inner());
+
+            debug!(
+                target: "payload_builder",
+                ?tx_hash,
+                required = ext_tx.required,
+                instance_id = ?ext_tx.instance_id,
+                gas_used,
+                "executed sidecar transaction"
+            );
+        }
+
+        Ok(())
     }
 }
