@@ -757,7 +757,7 @@ where
                 chain_id: ctx.chain_id(),
                 block_number: ctx.block_number(),
                 flashblock_index,
-                state_root: ctx.parent_hash(),
+                state_root: ctx.parent().header().state_root,
                 timestamp: ctx.timestamp(),
                 gas_limit: target_gas_for_batch,
             })
