@@ -787,13 +787,7 @@ where
             }
             Ok(_) => {}
             Err(err) => {
-                warn!(
-                    target: "payload_builder",
-                    block_number = ctx.block_number(),
-                    flashblock_index,
-                    %err,
-                    "sidecar poll failed, continuing without external transactions"
-                );
+                return Err(err).wrap_err("sidecar poll failed");
             }
         }
 
