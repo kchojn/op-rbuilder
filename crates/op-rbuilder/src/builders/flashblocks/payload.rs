@@ -751,6 +751,16 @@ where
         }
 
         // Poll sidecar for cross-chain transactions
+        let state_overrides = if self.sidecar.is_enabled() {
+            let overrides = crate::sidecar::build_state_overrides(state);
+            match overrides.as_object() {
+                Some(map) if map.is_empty() => None,
+                Some(_) => Some(overrides),
+                None => None,
+            }
+        } else {
+            None
+        };
         match self
             .sidecar
             .poll_transactions(&crate::sidecar::PollRequest {
@@ -760,6 +770,7 @@ where
                 state_root: ctx.parent().header().state_root,
                 timestamp: ctx.timestamp(),
                 gas_limit: target_gas_for_batch,
+                state_overrides,
             })
             .await
         {

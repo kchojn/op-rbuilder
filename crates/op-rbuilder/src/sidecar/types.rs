@@ -55,6 +55,10 @@ pub struct PollRequest {
 
     /// Gas limit available for this flashblock.
     pub gas_limit: u64,
+
+    /// Optional state overrides representing the in-progress builder state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_overrides: Option<serde_json::Value>,
 }
 
 /// Response from the sidecar when polling for transactions.
