@@ -750,47 +750,10 @@ where
             *footprint = footprint.saturating_sub(builder_tx_da_size.saturating_mul(scalar as u64));
         }
 
-        // Poll sidecar for cross-chain transactions
-        let state_overrides = if self.sidecar.is_enabled() {
-            let overrides = crate::sidecar::build_state_overrides(state);
-            match overrides.as_object() {
-                Some(map) if map.is_empty() => None,
-                Some(_) => Some(overrides),
-                None => None,
-            }
-        } else {
-            None
-        };
-        match self
-            .sidecar
-            .poll_transactions(&crate::sidecar::PollRequest {
-                chain_id: ctx.chain_id(),
-                block_number: ctx.block_number(),
-                flashblock_index,
-                state_root: ctx.parent().header().state_root,
-                timestamp: ctx.timestamp(),
-                gas_limit: target_gas_for_batch,
-                state_overrides,
-            })
-            .await
-        {
-            Ok(Some(external_txs)) if !external_txs.is_empty() => {
-                ctx.execute_sidecar_transactions(
-                    info,
-                    state,
-                    external_txs,
-                    target_gas_for_batch.min(ctx.block_gas_limit()),
-                    target_da_for_batch,
-                    target_da_footprint_for_batch,
-                )
-                .wrap_err("failed to execute sidecar transactions")?;
-            }
-            Ok(_) => {}
-            Err(err) => {
-                return Err(err).wrap_err("sidecar poll failed");
-            }
-        }
-
+        // Execute pool transactions first.  The sidecar poll is deferred until after the pool so
+        // that (a) state_overrides sent to the sidecar reflect this flashblock's pool-tx effects
+        // and (b) pool txs are never blocked by the sidecar hold loop — only the tail of the
+        // flashblock waits on cross-chain coordination.
         let best_txs_start_time = Instant::now();
         best_txs.refresh_iterator(
             BestPayloadTransactions::new(
@@ -808,6 +771,7 @@ where
             .set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
+        let gas_before_sidecar = info.cumulative_gas_used;
         ctx.execute_best_transactions(
             info,
             state,
@@ -845,6 +809,50 @@ where
         ctx.metrics
             .payload_transaction_simulation_gauge
             .set(payload_transaction_simulation_time);
+
+        // Poll sidecar for cross-chain transactions.  State overrides are computed after pool txs
+        // so the sidecar simulation sees the most accurate state for this flashblock.  Any XT
+        // decided while pool txs were executing can be delivered immediately here.
+        let pool_gas_used = info.cumulative_gas_used.saturating_sub(gas_before_sidecar);
+        let state_overrides = if self.sidecar.is_enabled() {
+            let overrides = crate::sidecar::build_state_overrides(state);
+            match overrides.as_object() {
+                Some(map) if map.is_empty() => None,
+                Some(_) => Some(overrides),
+                None => None,
+            }
+        } else {
+            None
+        };
+        match self
+            .sidecar
+            .poll_transactions(&crate::sidecar::PollRequest {
+                chain_id: ctx.chain_id(),
+                block_number: ctx.block_number(),
+                flashblock_index,
+                state_root: ctx.parent().header().state_root,
+                timestamp: ctx.timestamp(),
+                gas_limit: target_gas_for_batch.saturating_sub(pool_gas_used),
+                state_overrides,
+            })
+            .await
+        {
+            Ok(Some(external_txs)) if !external_txs.is_empty() => {
+                ctx.execute_sidecar_transactions(
+                    info,
+                    state,
+                    external_txs,
+                    target_gas_for_batch.min(ctx.block_gas_limit()),
+                    target_da_for_batch,
+                    target_da_footprint_for_batch,
+                )
+                .wrap_err("failed to execute sidecar transactions")?;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return Err(err).wrap_err("sidecar poll failed");
+            }
+        }
 
         if let Err(e) = self
             .builder_tx
