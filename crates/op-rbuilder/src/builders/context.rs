@@ -37,7 +37,7 @@ use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 
 use crate::{
     gas_limiter::AddressGasLimiter,
@@ -658,6 +658,13 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 Ok(tx) => tx,
                 Err(err) => {
                     if ext_tx.required {
+                        error!(
+                            target: "payload_builder",
+                            %err,
+                            raw_len = ext_tx.raw.len(),
+                            instance_id = ?ext_tx.instance_id,
+                            "required sidecar transaction decode failed"
+                        );
                         return Err(PayloadBuilderError::other(SidecarError::DecodeError(
                             err.to_string(),
                         )));
@@ -677,6 +684,12 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 Ok(tx) => tx,
                 Err(_) => {
                     if ext_tx.required {
+                        error!(
+                            target: "payload_builder",
+                            ?tx_hash,
+                            instance_id = ?ext_tx.instance_id,
+                            "required sidecar transaction signature recovery failed"
+                        );
                         return Err(PayloadBuilderError::other(
                             SidecarError::SignatureRecoveryFailed,
                         ));
@@ -693,6 +706,14 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             // Sidecar transactions must not be deposit or blob transactions
             if tx.is_eip4844() || tx.is_deposit() {
                 if ext_tx.required {
+                    error!(
+                        target: "payload_builder",
+                        ?tx_hash,
+                        is_blob = tx.is_eip4844(),
+                        is_deposit = tx.is_deposit(),
+                        instance_id = ?ext_tx.instance_id,
+                        "required sidecar transaction has invalid type"
+                    );
                     return Err(PayloadBuilderError::other(
                         SidecarError::InvalidTransactionType,
                     ));
@@ -720,6 +741,15 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 block_da_footprint_limit,
             ) {
                 if ext_tx.required {
+                    error!(
+                        target: "payload_builder",
+                        ?tx_hash,
+                        %result,
+                        gas_limit = tx.gas_limit(),
+                        tx_da_size,
+                        instance_id = ?ext_tx.instance_id,
+                        "required sidecar transaction exceeds block limits"
+                    );
                     return Err(PayloadBuilderError::other(SidecarError::LimitsExceeded(
                         result.to_string(),
                     )));
@@ -738,6 +768,13 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 Ok(res) => res,
                 Err(err) => {
                     if ext_tx.required {
+                        error!(
+                            target: "payload_builder",
+                            %err,
+                            ?tx_hash,
+                            instance_id = ?ext_tx.instance_id,
+                            "required sidecar transaction execution failed"
+                        );
                         return Err(PayloadBuilderError::other(SidecarError::ExecutionFailed(
                             err.to_string(),
                         )));
@@ -755,6 +792,13 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             // Handle reverted transactions
             if !result.is_success() {
                 if ext_tx.required {
+                    error!(
+                        target: "payload_builder",
+                        ?tx_hash,
+                        ?result,
+                        instance_id = ?ext_tx.instance_id,
+                        "required sidecar transaction reverted during execution"
+                    );
                     return Err(PayloadBuilderError::other(
                         SidecarError::TransactionReverted(tx_hash.to_string()),
                     ));

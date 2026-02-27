@@ -838,18 +838,42 @@ where
             .await
         {
             Ok(Some(external_txs)) if !external_txs.is_empty() => {
-                ctx.execute_sidecar_transactions(
+                let sidecar_tx_count = external_txs.len();
+                let sidecar_required_count = external_txs.iter().filter(|tx| tx.required).count();
+
+                if let Err(err) = ctx.execute_sidecar_transactions(
                     info,
                     state,
                     external_txs,
                     target_gas_for_batch.min(ctx.block_gas_limit()),
                     target_da_for_batch,
                     target_da_footprint_for_batch,
-                )
-                .wrap_err("failed to execute sidecar transactions")?;
+                ) {
+                    error!(
+                        target: "payload_builder",
+                        chain_id = ctx.chain_id(),
+                        block_number = ctx.block_number(),
+                        flashblock_index,
+                        sidecar_tx_count,
+                        sidecar_required_count,
+                        err = %err,
+                        err_debug = ?err,
+                        "failed while executing sidecar transactions"
+                    );
+                    return Err(err).wrap_err("failed to execute sidecar transactions");
+                }
             }
             Ok(_) => {}
             Err(err) => {
+                error!(
+                    target: "payload_builder",
+                    chain_id = ctx.chain_id(),
+                    block_number = ctx.block_number(),
+                    flashblock_index,
+                    err = %err,
+                    err_debug = ?err,
+                    "sidecar poll failed"
+                );
                 return Err(err).wrap_err("sidecar poll failed");
             }
         }
