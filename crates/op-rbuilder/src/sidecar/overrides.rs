@@ -34,8 +34,8 @@ pub fn build_state_overrides<DB: Database>(state: &State<DB>) -> Value {
         for (slot, value) in account.storage.iter() {
             if value.is_changed() {
                 state_diff.insert(
-                    format!("{:#x}", slot),
-                    Value::String(format!("{:#x}", value.present_value())),
+                    format!("0x{slot:064x}"),
+                    Value::String(format!("0x{:064x}", value.present_value())),
                 );
             }
         }

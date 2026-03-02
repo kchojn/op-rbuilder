@@ -865,16 +865,14 @@ where
             }
             Ok(_) => {}
             Err(err) => {
-                error!(
+                warn!(
                     target: "payload_builder",
                     chain_id = ctx.chain_id(),
                     block_number = ctx.block_number(),
                     flashblock_index,
                     err = %err,
-                    err_debug = ?err,
-                    "sidecar poll failed"
+                    "sidecar poll failed, continuing without external transactions"
                 );
-                return Err(err).wrap_err("sidecar poll failed");
             }
         }
 
